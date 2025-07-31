@@ -1,0 +1,81 @@
+version: '3.8'
+
+services:
+  kafka:
+    image: bitnami/kafka:latest
+    container_name: kafka-broker
+    ports:
+      - "9092:9092"
+    networks:
+      - kafka-net
+    environment:
+      # Configuração do Broker
+      - KAFKA_CFG_NODE_ID=0
+      - KAFKA_CFG_PROCESS_ROLES=controller,broker
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=0@kafka:9093
+      # Desabilita a criação automática de tópicos
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=false
+    healthcheck:
+      test: ["CMD", "kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  kafka-setup:
+    image: bitnami/kafka:latest
+    container_name: kafka-setup
+    networks:
+      - kafka-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: >
+      bash -c "
+        echo 'Criando tópico pedidos-novos com 3 partições...' &&
+        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic pedidos-novos --partitions 3 --replication-factor 1 && 
+        echo 'Criando tópico pedidos-processados-interno com 1 partição...' &&
+        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic pedidos-processados-interno --partitions 1 --replication-factor 1 && 
+        echo 'Tópicos criados com sucesso.' && 
+        sleep infinity"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server kafka:9092 --describe --topic pedidos-novos | grep -q 'PartitionCount: 3'"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  produtor-kafka:
+    build:
+      context: ./produtor-kafka
+      dockerfile: src/main/docker/Dockerfile.jvm
+    container_name: produtor-kafka
+    ports:
+      - "8080:8080"
+    networks:
+      - kafka-net
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+    depends_on:
+      kafka-setup:
+        condition: service_healthy
+
+  processador-kafka:
+    build:
+      context: ./processador-kafka
+      dockerfile: src/main/docker/Dockerfile.jvm
+    networks:
+      - kafka-net
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+    deploy:
+      replicas: 3
+    depends_on:
+      kafka-setup:
+        condition: service_healthy
+
+networks:
+  kafka-net:
+    driver: bridge
